@@ -1,0 +1,31 @@
+# ================================================================
+# InfraGenie — Python dependencies
+# ================================================================
+
+# Web framework & server
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+
+# Environment & config
+python-dotenv>=1.0.1
+pydantic>=2.7.0
+pydantic-settings>=2.2.1
+
+# Google Gemini AI
+google-generativeai>=0.5.4
+
+# Vector database
+chromadb>=0.5.0
+
+# AWS SDK
+boto3>=1.34.0
+
+# Database (async SQLAlchemy + SQLite driver)
+sqlalchemy>=2.0.30
+aiosqlite>=0.20.0
+
+# WebSocket support
+websockets>=12.0
+
+# HTTP client (for internal service calls)
+httpx>=0.27.0

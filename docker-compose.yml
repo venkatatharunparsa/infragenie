@@ -1,0 +1,63 @@
+# ================================================================
+# InfraGenie — Docker Compose (local development)
+# ================================================================
+
+version: "3.9"
+
+services:
+
+  # ── Backend (FastAPI + Terraform toolchain) ──────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: infragenie-backend
+    ports:
+      - "8000:8000"
+    volumes:
+      # Hot-reload: live-mount backend source
+      - ./backend:/app
+      # Persistent Terraform workspaces (survives container restart)
+      - ./terraform_workspace:/terraform_workspace
+      # ChromaDB vector store persistence
+      - ./chroma_db:/chroma_db
+      # Knowledge base documents
+      - ./knowledge:/knowledge
+    env_file:
+      - .env
+    environment:
+      # Override paths to mount locations
+      CHROMA_PERSIST_DIR: /chroma_db
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+  # ── Frontend (Create React App dev server) ───────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: infragenie-frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      REACT_APP_API_URL: "http://localhost:8000"
+      REACT_APP_WS_URL:  "ws://localhost:8000"
+      # Pull API key from host .env (set before running docker-compose)
+      REACT_APP_API_KEY: "${INFRAGENIE_SECRET}"
+    volumes:
+      # Hot-reload: live-mount frontend source (but not node_modules)
+      - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
+    restart: unless-stopped
+
+volumes:
+  chroma_data: {}
+  terraform_ws: {}
