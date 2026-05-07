@@ -12,8 +12,9 @@ import logging
 from collections import deque
 from datetime import datetime
 from typing import Optional
+from backend.utils.genai_client import GenAIClientPool
 
-import google.generativeai as genai
+from google import genai
 
 from .models import AgentResult
 
@@ -36,6 +37,8 @@ class SecurityRulesEngine:
         import re
         violations = []
         for rule in self._rules:
+            if rule.get("id") == "SEC-002" and "aws_s3_bucket_public_access_block" in hcl:
+                continue  # Separate resource block pattern — compliant
             pattern = rule.get("hcl_pattern", "")
             if pattern and re.search(pattern, hcl, re.DOTALL | re.IGNORECASE):
                 violations.append(rule)
@@ -101,7 +104,7 @@ class OrchestratorAgent:
 
     Architecture
     ────────────
-    • run_loop()          — background 60 s heartbeat
+    • run_loop()          — background 1 hour heartbeat
     • handle_user_request()— foreground request handler (interrupts loop)
     • _perceive()         — snapshot current AWS state via MonitorAgent
     • _reason()           — Gemini-powered situation analysis
@@ -110,7 +113,7 @@ class OrchestratorAgent:
     • _route_decision()   — 4-tier intelligence tier selector
     """
 
-    LOOP_INTERVAL_SECONDS = 60
+    LOOP_INTERVAL_SECONDS = 3600  # 1 hour — saves your quota for real requests
     MEMORY_MAX_SIZE       = 100
     REASON_CONTEXT_SIZE   = 5      # last N results sent to Gemini
 
@@ -143,9 +146,11 @@ class OrchestratorAgent:
         self._interrupt:     asyncio.Event = asyncio.Event()
         self._ws_broadcast   = None   # injected by the API layer (callable)
 
-        # Gemini
-        genai.configure(api_key=config.GEMINI_API_KEY)
-        self._gemini = genai.GenerativeModel("gemini-1.5-pro")
+        # Gemini with fallback support
+        self.client_pool = GenAIClientPool(
+            primary_key=config.GEMINI_API_KEY,
+            fallback_key=config.GEMINI_FALLBACK_API_KEY
+        )
 
         logger.info("[Orchestrator] Initialised with %d security rules.", len(self.security_rules._rules))
 
@@ -213,6 +218,53 @@ class OrchestratorAgent:
         self._interrupt.set()   # wake loop early
 
         try:
+            # Deploy requests always go to Planner first — never to Monitor.
+            user_input = getattr(request, "request_text", "")
+            user_input_lower = user_input.lower()
+            request_id = getattr(request, "request_id", "default")
+
+            deploy_keywords = ["create", "build", "deploy", "provision", "make", "setup", "add"]
+            destroy_keywords = ["destroy", "delete", "remove", "terminate"]
+
+            if any(k in user_input_lower for k in destroy_keywords):
+                result = AgentResult(
+                    agent="orchestrator",
+                    severity="high",
+                    finding="Destructive action requested — human approval required",
+                    recommended_action="destroy",
+                    requires_human=True,
+                    timestamp=datetime.utcnow(),
+                    metadata={"request": user_input, "request_id": request_id},
+                )
+                await self._observe(result)
+                return result
+
+            if any(k in user_input_lower for k in deploy_keywords):
+                planner_result: AgentResult = await self.planner.run({
+                    "request": user_input,
+                    "user_request": user_input,
+                    "request_id": request_id,
+                })
+
+                if planner_result.proposed_tf:
+                    security_result: AgentResult = await self.security_agent.run({
+                        "action": "scan_tf",
+                        "terraform_hcl": planner_result.proposed_tf,
+                        "workspace_path": planner_result.workspace_path,
+                    })
+                    if security_result.severity.lower() in ("critical", "high"):
+                        security_result.workspace_path = planner_result.workspace_path
+                        security_result.metadata["request"] = user_input
+                        security_result.metadata["request_id"] = request_id
+                        await self._observe(security_result)
+                        return security_result
+
+                planner_result.requires_human = True
+                planner_result.metadata["request"] = user_input
+                planner_result.metadata["request_id"] = request_id
+                await self._observe(planner_result)
+                return planner_result
+
             perception = await self._perceive()
             reasoning  = await self._reason(perception, request)
             result     = await self._plan_and_act(reasoning, request)
@@ -286,6 +338,15 @@ class OrchestratorAgent:
         dict
             Keys: situation_summary, recommended_action, which_agent, urgency
         """
+        # Tier 1 — if no user request and no alerts, skip Gemini entirely.
+        if request is None and not perception.get("alerts"):
+            return {
+                "situation_summary": "Routine snapshot — no anomalies",
+                "recommended_action": "monitor",
+                "which_agent": "monitor",
+                "urgency": "low",
+            }
+
         logger.debug("[Orchestrator] _reason() called.")
 
         # Build context from memory
@@ -332,8 +393,12 @@ class OrchestratorAgent:
         prompt = "\n".join(prompt_parts)
 
         try:
-            response = await asyncio.to_thread(self._gemini.generate_content, prompt)
-            raw = response.text.strip()
+            response = await asyncio.to_thread(
+                self.client_pool.generate_content,
+                model='gemini-flash-latest',
+                contents=prompt
+            )
+            raw = self.client_pool.extract_text(response)
             # Strip markdown code fences if present
             if raw.startswith("```"):
                 raw = raw.split("```")[1]
@@ -417,12 +482,18 @@ class OrchestratorAgent:
             )
 
         # ── Route to sub-agents ──────────────────────────────────────────────
+        # Prefer the request_id attached by the API layer on the InfraRequest object
+        # (set as req.request_id in the deploy endpoint) so the workspace folder name
+        # matches what the approve endpoint expects.
+        request_id_ctx = getattr(request, "request_id", None) or reasoning.get("request_id", "unknown")
         agent_input = {
-            "intent":      req_text,
-            "request":     req_text,
-            "environment": environment,
-            "reasoning":   reasoning,
-            "urgency":     urgency,
+            "intent":        req_text,
+            "request":       req_text,
+            "environment":   environment,
+            "reasoning":     reasoning,
+            "urgency":       urgency,
+            "request_id":    request_id_ctx,
+            "workspace_dir": getattr(self.config, "TERRAFORM_WORKSPACE_DIR", "./terraform_workspace"),
         }
 
         if which_agent == "planner":

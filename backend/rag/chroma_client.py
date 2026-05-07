@@ -14,11 +14,12 @@ import logging
 import re
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Any, Optional
 
 import chromadb
 from chromadb.config import Settings as ChromaSettings
-import google.generativeai as genai
+from google import genai
+from backend.utils.genai_client import GenAIClientPool
 
 logger = logging.getLogger(__name__)
 
@@ -48,19 +49,24 @@ class ChromaRAGClient:
     # Initialisation
     # -----------------------------------------------------------------
 
-    def __init__(self, persist_dir: str, gemini_api_key: str):
+    def __init__(self, persist_dir: str, gemini_api_key: str, fallback_key: Optional[str] = None):
         """
         Parameters
         ----------
         persist_dir    : str — filesystem path for ChromaDB persistence.
         gemini_api_key : str — Google Gemini API key for embeddings.
+        fallback_key   : str — Optional fallback key.
         """
         self.persist_dir = persist_dir
         self.gemini_api_key = gemini_api_key
+        self.fallback_key = fallback_key
 
-        # Configure the Gemini SDK
-        genai.configure(api_key=self.gemini_api_key)
-        self.embedding_model = "models/text-embedding-004"
+        # Configure the Gemini SDK pool
+        self.client_pool = GenAIClientPool(
+            primary_key=self.gemini_api_key,
+            fallback_key=self.fallback_key
+        )
+        self.embedding_model = "models/gemini-embedding-2"
 
         # Initialise ChromaDB persistent client
         self.chroma = chromadb.PersistentClient(
@@ -98,12 +104,12 @@ class ChromaRAGClient:
         """
         try:
             result = await asyncio.to_thread(
-                genai.embed_content,
+                self.client_pool.embed_content,
                 model=self.embedding_model,
-                content=text,
-                task_type=task_type,
+                contents=text,
+                config={'task_type': task_type},
             )
-            return result["embedding"]
+            return result.embeddings[0].values
         except Exception as exc:
             logger.error("[ChromaRAGClient] embed() failed: %s", exc)
             raise

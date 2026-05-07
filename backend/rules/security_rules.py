@@ -19,6 +19,7 @@ SECURITY_RULES = [
         "description": "All S3 buckets must have block_public_acls, block_public_policy, "
                        "ignore_public_acls, and restrict_public_buckets set to true.",
         "hcl_pattern": r'aws_s3_bucket(?!.*block_public_access)',
+        "compliant_if_contains": "aws_s3_bucket_public_access_block",
     },
     {
         "id": "SEC-003",

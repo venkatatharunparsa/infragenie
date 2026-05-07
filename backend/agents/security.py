@@ -174,6 +174,7 @@ class SecurityAgent:
             recommended_action="address listed violations" if violations else "continue deployment",
             requires_human=worst_sev in ("high", "critical"),
             proposed_tf=fixed_code,
+            workspace_path=workspace_path,
             timestamp=datetime.utcnow(),
             metadata={
                 "workspace": workspace_path,
@@ -199,17 +200,22 @@ class SecurityAgent:
         cmd = ["tfsec", workspace_path, "--format", "json", "--no-colour"]
         logger.info("[SecurityAgent] Executing tfsec: %s", " ".join(cmd))
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=workspace_path,
+            # Use subprocess.run instead of asyncio.create_subprocess_exec for Windows compatibility
+            import subprocess
+            result = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    cwd=workspace_path,
+                    timeout=60  # 60 second timeout
+                )
             )
-            stdout_b, stderr_b = await proc.communicate()
-            if proc.returncode not in (0, 1):  # 1 indicates findings
-                logger.warning("tfsec exited with code %s: %s", proc.returncode, stderr_b.decode())
+            if result.returncode not in (0, 1):  # 1 indicates findings
+                logger.warning("tfsec exited with code %s: %s", result.returncode, result.stderr)
                 return []
-            data = json.loads(stdout_b.decode())
+            data = json.loads(result.stdout)
             results = []
             for r in data.get("results", []):
                 results.append({
@@ -237,17 +243,22 @@ class SecurityAgent:
         cmd = ["checkov", "-d", workspace_path, "--output", "json", "--quiet"]
         logger.info("[SecurityAgent] Executing checkov: %s", " ".join(cmd))
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=workspace_path,
+            # Use subprocess.run instead of asyncio.create_subprocess_exec for Windows compatibility
+            import subprocess
+            result = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    cwd=workspace_path,
+                    timeout=120  # 2 minute timeout for checkov
+                )
             )
-            stdout_b, stderr_b = await proc.communicate()
-            if proc.returncode not in (0, 1):
-                logger.warning("checkov exited with code %s: %s", proc.returncode, stderr_b.decode())
+            if result.returncode not in (0, 1):
+                logger.warning("checkov exited with code %s: %s", result.returncode, result.stderr)
                 return []
-            data = json.loads(stdout_b.decode())
+            data = json.loads(result.stdout)
             failed = data.get("results", {}).get("failed_checks", [])
             results = []
             for f in failed:

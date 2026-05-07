@@ -1,44 +1,17 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
+.env
 .venv/
-.pytest_cache/
-pytest-cache-files-*/
-
-# Node / React
+__pycache__/
+*.pyc
 node_modules/
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
 build/
 dist/
-
-# Infrastructure / Terraform
 .terraform/
-*.tfstate
-*.tfstate.backup
+*.tfstate*
 .terraform.lock.hcl
-terraform_workspace/
-
-# Database / RAG
-*.db
-*.sqlite3
 chroma_db/
-
-# Environment / Secrets
-.env
-.env.local
-.env.development.local
-.env.test.local
-.env.production.local
-
-# IDEs
+infragenie.db
+terraform_workspace/*/
+.DS_Store
 .vscode/
-.idea/
-*.swp
-*.swo
-
-# OS
-Thumbs.db
-desktop.ini
+frontend/build/
+frontend/.env.local

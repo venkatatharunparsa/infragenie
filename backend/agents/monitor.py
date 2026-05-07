@@ -48,7 +48,7 @@ class MonitorAgent:
         self.cost_explorer_client = cost_explorer_client
         self.tf_runner            = tf_runner
         self.name                 = "monitor"
-        self.polling_interval     = 60  # seconds
+        self.polling_interval     = 3600  # 1 hour — saves your quota for real requests
 
         # Lazy boto3 clients — created on first use
         self._ec2    = None

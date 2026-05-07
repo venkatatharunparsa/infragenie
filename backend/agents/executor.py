@@ -127,10 +127,15 @@ class ExecutorAgent:
             logger.info("[ExecutorAgent] Apply attempt %d/%d", attempt, MAX_RETRIES)
 
             # ── terraform init ────────────────────────────────────────────
-            init_ok, init_err = await self._run_cmd(
-                ["terraform", "init", "-no-color", "-input=false"],
-                workspace_path, request_id, label="init"
-            )
+            if self.tf_runner:
+                init_result = await self.tf_runner.init(workspace_path)
+                init_ok = init_result.success
+                init_err = init_result.stdout  # combined stdout+stderr
+            else:
+                init_ok, init_err = await self._run_cmd(
+                    ["terraform", "init", "-no-color", "-input=false", "-backend=false"],
+                    workspace_path, request_id, label="init"
+                )
             if not init_ok:
                 corrected = await self._self_correct(init_err, workspace_path, attempt)
                 if corrected and attempt < MAX_RETRIES:
@@ -140,10 +145,23 @@ class ExecutorAgent:
                 )
 
             # ── terraform plan ────────────────────────────────────────────
-            plan_ok, plan_err = await self._run_cmd(
-                ["terraform", "plan", "-no-color", "-input=false", "-out=tfplan"],
-                workspace_path, request_id, label="plan"
-            )
+            if self.tf_runner:
+                # Pass AWS credentials as variables to terraform plan
+                variables = {
+                    "aws_access_key": self.config.AWS_ACCESS_KEY_ID,
+                    "aws_secret_key": self.config.AWS_SECRET_ACCESS_KEY,
+                    "aws_region": self.config.AWS_DEFAULT_REGION,
+                }
+                plan_result = await self.tf_runner.plan(workspace_path, variables)
+                plan_ok = plan_result.success
+                plan_err = plan_result.stdout  # combined stdout+stderr
+                plan_out = plan_result.stdout
+            else:
+                plan_ok, plan_out = await self._run_cmd(
+                    ["terraform", "plan", "-no-color", "-input=false", "-out=tfplan"],
+                    workspace_path, request_id, label="plan"
+                )
+                plan_err = plan_out
             if not plan_ok:
                 corrected = await self._self_correct(plan_err, workspace_path, attempt)
                 if corrected and attempt < MAX_RETRIES:
@@ -153,10 +171,21 @@ class ExecutorAgent:
                 )
 
             # ── terraform apply ───────────────────────────────────────────
-            apply_ok, apply_out = await self._run_cmd(
-                ["terraform", "apply", "-no-color", "-auto-approve", "tfplan"],
-                workspace_path, request_id, label="apply"
-            )
+            if self.tf_runner:
+                # Pass AWS credentials as variables to terraform apply
+                variables = {
+                    "aws_access_key": self.config.AWS_ACCESS_KEY_ID,
+                    "aws_secret_key": self.config.AWS_SECRET_ACCESS_KEY,
+                    "aws_region": self.config.AWS_DEFAULT_REGION,
+                }
+                apply_result = await self.tf_runner.apply(workspace_path, variables)
+                apply_ok = apply_result.success
+                apply_out = apply_result.stdout  # combined stdout+stderr
+            else:
+                apply_ok, apply_out = await self._run_cmd(
+                    ["terraform", "apply", "-no-color", "-auto-approve", "tfplan"],
+                    workspace_path, request_id, label="apply"
+                )
             if not apply_ok:
                 corrected = await self._self_correct(apply_out, workspace_path, attempt)
                 if corrected and attempt < MAX_RETRIES:
@@ -212,10 +241,21 @@ class ExecutorAgent:
         if not init_ok:
             return self._error_result("terraform init failed during plan.", init_err, 1)
 
-        plan_ok, plan_out = await self._run_cmd(
-            ["terraform", "plan", "-no-color", "-input=false"],
-            workspace_path, request_id, label="plan"
-        )
+        if self.tf_runner:
+            # Pass AWS credentials as variables to terraform plan
+            variables = {
+                "aws_access_key": self.config.AWS_ACCESS_KEY_ID,
+                "aws_secret_key": self.config.AWS_SECRET_ACCESS_KEY,
+                "aws_region": self.config.AWS_DEFAULT_REGION,
+            }
+            plan_result = await self.tf_runner.plan(workspace_path, variables)
+            plan_ok = plan_result.success
+            plan_out = plan_result.stdout  # combined stdout+stderr
+        else:
+            plan_ok, plan_out = await self._run_cmd(
+                ["terraform", "plan", "-no-color", "-input=false"],
+                workspace_path, request_id, label="plan"
+            )
 
         # Parse summary regardless of exit code (plan exits 1 when changes exist)
         from terraform.tf_validator import TerraformValidator
@@ -267,17 +307,27 @@ class ExecutorAgent:
             )
 
         # Init first
-        init_ok, init_err = await self._run_cmd(
-            ["terraform", "init", "-no-color", "-input=false"],
-            workspace_path, request_id, label="init"
-        )
+        if self.tf_runner:
+            init_result = await self.tf_runner.init(workspace_path)
+            init_ok = init_result.success
+            init_err = init_result.stdout  # combined stdout+stderr
+        else:
+            init_ok, init_err = await self._run_cmd(
+                ["terraform", "init", "-no-color", "-input=false", "-backend=false"],
+                workspace_path, request_id, label="init"
+            )
         if not init_ok:
             return self._error_result("terraform init failed before destroy.", init_err, 1)
 
-        destroy_ok, destroy_out = await self._run_cmd(
-            ["terraform", "destroy", "-no-color", "-auto-approve", "-input=false"],
-            workspace_path, request_id, label="destroy"
-        )
+        if self.tf_runner:
+            destroy_result = await self.tf_runner.destroy(workspace_path)
+            destroy_ok = destroy_result.success
+            destroy_out = destroy_result.stdout  # combined stdout+stderr
+        else:
+            destroy_ok, destroy_out = await self._run_cmd(
+                ["terraform", "destroy", "-no-color", "-auto-approve", "-input=false"],
+                workspace_path, request_id, label="destroy"
+            )
 
         if not destroy_ok:
             return self._error_result("terraform destroy failed.", destroy_out, 1)
@@ -519,10 +569,13 @@ class ExecutorAgent:
 
     def _error_result(self, finding: str, error_detail: str, attempts: int) -> AgentResult:
         """Convenience builder for error AgentResult."""
+        full_finding = finding
+        if error_detail and error_detail.strip():
+            full_finding = f"{finding}\n\nError details: {error_detail}"
         return AgentResult(
             agent=self.name,
             severity="high",
-            finding=finding,
+            finding=full_finding,
             recommended_action="Review the error details and correct the Terraform configuration.",
             requires_human=True,
             timestamp=datetime.utcnow(),

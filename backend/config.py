@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     # AI / LLM
     # ------------------------------------------------------------------ #
     GEMINI_API_KEY: str = ""
+    GEMINI_FALLBACK_API_KEY: str = ""
 
     # ------------------------------------------------------------------ #
     # AWS credentials & region
@@ -55,3 +56,8 @@ class Settings(BaseSettings):
     # ChromaDB vector store
     # ------------------------------------------------------------------ #
     CHROMA_PERSIST_DIR: str = "./chroma_db"
+
+    # ------------------------------------------------------------------ #
+    # Terraform workspace
+    # ------------------------------------------------------------------ #
+    TERRAFORM_WORKSPACE_DIR: str = "./terraform_workspace"

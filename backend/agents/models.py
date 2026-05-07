@@ -42,5 +42,6 @@ class AgentResult:
     requires_human: bool
     proposed_tf: str = ""
     estimated_cost_delta: str = "$0.00"
+    workspace_path: str = ""
     timestamp: datetime = field(default_factory=datetime.utcnow)
     metadata: dict = field(default_factory=dict)

@@ -7,6 +7,7 @@ a specific workspace directory.
 import asyncio
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass
 
@@ -38,43 +39,45 @@ class TerraformRunner:
             Path to the terraform executable or just 'terraform' if in PATH.
         """
         self.terraform_binary = terraform_binary
-        self.timeout = 600  # 10 minutes maximum
+        self.timeout = 1200  # 20 minutes maximum
 
     async def _run_command(self, workspace_path: str, args: list[str]) -> TerraformResult:
         """
         Internal helper to execute a command with timeout and capture output.
         """
+        # Ensure absolute path for Windows compatibility
+        workspace_path = os.path.abspath(workspace_path)
+        
+        # Set up environment with AWS credentials
+        env = os.environ.copy()
+        env["AWS_ACCESS_KEY_ID"] = os.getenv("AWS_ACCESS_KEY_ID", "")
+        env["AWS_SECRET_ACCESS_KEY"] = os.getenv("AWS_SECRET_ACCESS_KEY", "")
+        env["AWS_DEFAULT_REGION"] = os.getenv("AWS_DEFAULT_REGION", "us-east-1")
+        
+        cmd = [self.terraform_binary] + args
         cmd_str = f"{self.terraform_binary} {' '.join(args)}"
         logger.info(f"[TerraformRunner] Running in {workspace_path}: {cmd_str}")
         
         start_time = time.monotonic()
         
         try:
-            proc = await asyncio.create_subprocess_exec(
-                self.terraform_binary,
-                *args,
-                cwd=workspace_path,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+            # Use subprocess.run instead of asyncio.create_subprocess_exec for Windows compatibility
+            import subprocess
+            result = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    cwd=workspace_path,
+                    env=env,
+                    timeout=self.timeout
+                )
             )
             
-            # Wait for command completion with timeout
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                proc.communicate(), 
-                timeout=self.timeout
-            )
-            
-        except asyncio.TimeoutError:
+        except subprocess.TimeoutExpired:
             duration = time.monotonic() - start_time
             logger.error(f"[TerraformRunner] Timeout after {duration:.2f}s: {cmd_str}")
-            
-            # Attempt to kill the process if it timed out
-            try:
-                proc.kill()
-                await proc.wait()
-            except Exception as e:
-                logger.warning(f"[TerraformRunner] Failed to kill timed out process: {e}")
-                
             raise TerraformTimeoutError(f"Command '{cmd_str}' timed out after {self.timeout} seconds.")
             
         except Exception as e:
@@ -89,22 +92,23 @@ class TerraformRunner:
             )
 
         duration = time.monotonic() - start_time
-        stdout = stdout_bytes.decode("utf-8", errors="replace")
-        stderr = stderr_bytes.decode("utf-8", errors="replace")
+        
+        # Combine stdout and stderr for return value
+        combined_output = result.stdout + result.stderr
         
         # Determine success
         # 'plan -detailed-exitcode' returns 2 when there are changes, which is success
-        success = proc.returncode == 0
-        if "plan" in args and "-detailed-exitcode" in args and proc.returncode == 2:
+        success = result.returncode == 0
+        if "plan" in args and "-detailed-exitcode" in args and result.returncode == 2:
             success = True
             
-        logger.debug(f"[TerraformRunner] Completed with code {proc.returncode} in {duration:.2f}s")
+        logger.debug(f"[TerraformRunner] Completed with code {result.returncode} in {duration:.2f}s")
             
         return TerraformResult(
             success=success,
-            stdout=stdout,
-            stderr=stderr,
-            exit_code=proc.returncode,
+            stdout=combined_output,
+            stderr=result.stderr,
+            exit_code=result.returncode,
             duration_seconds=duration
         )
 
@@ -113,14 +117,20 @@ class TerraformRunner:
         args = ["init", "-input=false", "-no-color"]
         return await self._run_command(workspace_path, args)
 
-    async def plan(self, workspace_path: str) -> TerraformResult:
+    async def plan(self, workspace_path: str, variables: dict = None) -> TerraformResult:
         """Run 'terraform plan' in the given workspace."""
         args = ["plan", "-input=false", "-no-color", "-detailed-exitcode"]
+        if variables:
+            for key, value in variables.items():
+                args.extend(["-var", f"{key}={value}"])
         return await self._run_command(workspace_path, args)
 
-    async def apply(self, workspace_path: str) -> TerraformResult:
+    async def apply(self, workspace_path: str, variables: dict = None) -> TerraformResult:
         """Run 'terraform apply' in the given workspace."""
         args = ["apply", "-auto-approve", "-input=false", "-no-color"]
+        if variables:
+            for key, value in variables.items():
+                args.extend(["-var", f"{key}={value}"])
         return await self._run_command(workspace_path, args)
 
     async def destroy(self, workspace_path: str) -> TerraformResult:

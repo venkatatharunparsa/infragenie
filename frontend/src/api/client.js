@@ -9,7 +9,7 @@ const client = axios.create({
     "Content-Type": "application/json",
     "X-API-Key": API_KEY,
   },
-  timeout: 120_000,
+  timeout: 600_000, // 10 minutes for long Terraform applies
 });
 
 /** POST /api/deploy */
